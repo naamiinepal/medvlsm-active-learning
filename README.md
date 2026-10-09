@@ -1,84 +1,133 @@
-# Exploring Transfer Learning in Medical Image Segmentation using Vision-Language Models
+# Active Learning for Medical Vision-Language Segmentation
 
+This repository contains experiments on active learning for few-shot adaptation of vision-language segmentation models to medical images.
 
+The main idea is to use the model's response to different text prompts as a measure of uncertainty. For the same image, we generate segmentation masks using several prompts referring to the same object. If the predictions disagree strongly, the image is treated as informative and selected for the next fine-tuning round.
 
-## Table of Contents
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Pretrained Model Preparation](#pretrained-model-preparation) 
-  - [Dataset Preparation](#dataset-preparation)
-  - [Zero Shot Segmentation](#zero-shot-segmentation)
-  - [Finetuning](#finetuning)
+The current implementation uses CLIPSeg and CRIS on polyp segmentation datasets.
 
-## Installation
+## Active learning setup
 
-To get started, it's recommended to create a Python (preferably v3.10) environment using either Conda or venv. This helps to manage dependencies and ensure a consistent runtime environment.
+For each unlabeled image:
 
-1. **Conda:**
-  ```bash
-    conda create --name your_env_name python=3.10
-    conda activate your_env_name
-  ```
-**OR**
+1. Run the model using prompts `p2` to `p9`
+2. Collect the 8 predicted segmentation masks
+3. Measure agreement between the masks using Multi-IoU
+4. Rank images by agreement
+5. Select images with the lowest Multi-IoU
+6. Add them to the training set
+7. Fine-tune the model and repeat
 
-2. **venv:**
-  ```bash
-    python -m venv your_env_name
-    source your_env_name/bin/activate
-  ```
+The sampling fractions used in the experiments are:
 
-Once your environment is active, install the required packages from `requirements.txt` using pip:
+`2.5%, 5%, 10%, 20%, 40%, 60%, 80%, 100%`
+
+A random sampling baseline is also included for comparison.
+
+## Models
+
+- CLIPSeg
+- CRIS
+
+## Datasets
+
+The experiments were run mainly on:
+
+- Kvasir-SEG
+- ClinicDB
+- BKAI polyp dataset
+
+The repository also contains cross-dataset evaluation scripts for testing how models trained on one dataset generalize to the others.
+
+## Setup
+
+Python 3.10 is recommended.
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## Usage
+The pretrained CRIS weights should be placed under `pretrained/`. CLIPSeg weights are loaded from Hugging Face.
 
-### Pretrained Model Preparation
-Because the pretrained weights of *BiomedCLIP* and *CLIPSeg* are readily available in the *Hugging Face Model Hub* you do not need to save the weights manually. However, the [pretrained weights](https://github.com/DerrickWang005/CRIS.pytorch/issues/3) of *CRIS* were extracted and then saved within the folder `pretrained/`. Please refer to the config file [cris.yaml](configs/model/cris.yaml) for more information.
+Dataset paths are configured through Hydra.
 
-### Dataset Preparation
-Before running any experiments, you need to ensure that the provided dataset is correctly placed within the `data/` folder at the root of the project. The directory structure of the `data/` folder should look like this:
+## Active learning code
+
+The main scripts are under:
+
+```text
+scripts/active_learning/
 ```
-data/
-│
-├── bkai_polyp/
-│   ├── anns/
-│   │   ├── test.json
-│   │   ├── train.json
-│   │   └── val.json
-│   ├── images/
-│   └── masks/
-│
-├── [other dataset folders...]
-│
-└── kvasir_polyp/
-    ├── anns/
-    │   ├── test.json
-    │   ├── train.json
-    │   └── val.json
-    ├── images/
-    └── masks/
+
+Important files:
+
+```text
+infer_al.py          # generate predictions for multiple prompts
+eval_al.py           # compute prompt consistency
+multi_iou.py         # Multi-IoU implementation
+finetune_al.py       # fine-tune on selected samples
+finetune_random.py   # random sampling baseline
 ```
-Each dataset folder (`bkai_polyp`, `busi`, `camus`, etc.) contains three sub-directories: `anns`, `images`, and `masks`. The anns directory contains prompt files (`test.json`, `train.json`, `val.json`), while `images` and `masks` hold input images and target masks respectively.
 
-### Zero Shot Segmentation
+Sample selection is handled in:
 
-To perform zero-shot segmentation, you can use the provided script. Open a terminal and navigate to the project directory, then execute the following command:
+```text
+utils/active_learning/metric_sampler.py
+```
+
+Random subsets are generated using:
+
+```text
+utils/active_learning/random_sampler.py
+```
+
+## Running an active learning round
+
+Generate predictions on the remaining pool:
+
 ```bash
-python scripts/zss.py
+python scripts/active_learning/infer_al.py --train_frac=0.1
 ```
-This script will initiate the zero-shot segmentation process and produce the desired results.
 
-### Finetuning
+Compute prompt consistency:
 
-If you need to run fine-tuning for your model, you can do so using the following script:
 ```bash
-python scripts/finetune.py
+python scripts/active_learning/eval_al.py \
+    --seg_root_path=<path-to-predicted-masks> \
+    --csv_path=<output-path>/consistency.csv
 ```
-This script will start the fine-tuning process, which is essential for customizing the model for specific tasks. For running inference, please update the defaults configs (such as `ckpt_path`, `models`, etc.) in `scripts/inference.py` to get the evulation metric or generate the output masks (in the original resolution).
 
+Select samples for the next fraction:
 
+```bash
+python utils/active_learning/metric_sampler.py \
+    --sampling_frac=0.2 \
+    --ds_root=<dataset-root> \
+    --op_root=<output-root> \
+    --ds_name=kvasir_polyp
+```
 
-### Acknowledgement
-We would like to thank [Lightning-Hydra-Template](https://github.com/ashleve/lightning-hydra-template) for providing a modifiable framework for running multiple experiments while tracking the hyperparameters.
+Fine-tune on the selected subset:
+
+```bash
+python scripts/active_learning/finetune_al.py --train_frac=0.2
+```
+
+## Random baseline
+
+Random subsets can be generated with:
+
+```bash
+python utils/active_learning/random_sampler.py \
+    --ds_root=<dataset-root> \
+    --ds_name=kvasir_polyp
+```
+
+and trained using:
+
+```bash
+python scripts/active_learning/finetune_random.py --train_frac=0.2
+```
+
+## Notes
+The active learning code currently included in this repository implements the Multi-IoU based sampling strategy.
